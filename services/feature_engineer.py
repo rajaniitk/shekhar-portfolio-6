@@ -1,653 +1,596 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import (
-    StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer,
-    LabelEncoder, OneHotEncoder, OrdinalEncoder,
-    PolynomialFeatures, KBinsDiscretizer
-)
-from sklearn.feature_selection import (
-    SelectKBest, f_classif, f_regression, chi2, mutual_info_classif, mutual_info_regression,
-    RFE, RFECV
-)
-from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, LabelEncoder, OneHotEncoder
+from sklearn.feature_selection import SelectKBest, f_classif, f_regression, mutual_info_classif, mutual_info_regression
+from sklearn.feature_selection import RFE, RFECV, VarianceThreshold, SelectFromModel
+from sklearn.decomposition import PCA, TruncatedSVD, FactorAnalysis
+from sklearn.cluster import DBSCAN
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LassoCV, RidgeCV
+from sklearn.model_selection import cross_val_score
 from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.experimental import enable_iterative_imputer  # noqa
+from sklearn.impute import IterativeImputer
 from scipy import stats
-from scipy.stats import boxcox
 import logging
-import json
 
 class FeatureEngineer:
-    """Comprehensive feature engineering and transformation engine"""
+    """Comprehensive feature engineering and preprocessing"""
     
     def __init__(self):
-        self.transformations_applied = []
-        self.feature_importance_scores = {}
-    
-    def analyze_features(self, df):
-        """Analyze features and suggest transformations"""
+        self.scaler = None
+        self.imputer = None
+        self.encoder = None
+        self.feature_selector = None
+        self.pca = None
+        
+    def handle_missing_values(self, df, strategy='auto', columns=None):
+        """
+        Comprehensive missing value handling
+        
+        Args:
+            df: DataFrame
+            strategy: 'mean', 'median', 'mode', 'constant', 'knn', 'iterative', 'drop', 'auto'
+            columns: List of columns to process (None for all)
+        """
         try:
-            suggestions = {
-                'numeric_transformations': {},
-                'categorical_transformations': {},
-                'feature_creation': {},
-                'feature_selection': {},
-                'data_quality': {}
-            }
+            if columns is None:
+                columns = df.columns.tolist()
             
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+            result_df = df.copy()
+            strategies_used = {}
             
-            # Analyze numeric features
-            for col in numeric_cols:
-                col_data = df[col].dropna()
-                if len(col_data) == 0:
+            for col in columns:
+                if col not in df.columns:
+                    continue
+                    
+                missing_count = df[col].isnull().sum()
+                if missing_count == 0:
+                    strategies_used[col] = 'no_missing'
                     continue
                 
-                col_suggestions = []
-                
-                # Check for skewness
-                skewness = col_data.skew()
-                if abs(skewness) > 1:
-                    if skewness > 1:
-                        col_suggestions.append({
-                            'type': 'log_transform',
-                            'reason': f'High positive skewness ({skewness:.2f})',
-                            'priority': 'high'
-                        })
-                    else:
-                        col_suggestions.append({
-                            'type': 'square_transform',
-                            'reason': f'High negative skewness ({skewness:.2f})',
-                            'priority': 'medium'
-                        })
-                
-                # Check for outliers
-                Q1 = col_data.quantile(0.25)
-                Q3 = col_data.quantile(0.75)
-                IQR = Q3 - Q1
-                outliers = len(col_data[(col_data < Q1 - 1.5 * IQR) | (col_data > Q3 + 1.5 * IQR)])
-                outlier_pct = (outliers / len(col_data)) * 100
-                
-                if outlier_pct > 5:
-                    col_suggestions.append({
-                        'type': 'robust_scaling',
-                        'reason': f'Contains {outlier_pct:.1f}% outliers',
-                        'priority': 'high'
-                    })
-                
-                # Check scale
-                if col_data.std() > 100 or col_data.max() > 1000:
-                    col_suggestions.append({
-                        'type': 'standard_scaling',
-                        'reason': 'Large scale values',
-                        'priority': 'medium'
-                    })
-                
-                # Check for zero inflation
-                zero_pct = (col_data == 0).sum() / len(col_data) * 100
-                if zero_pct > 50:
-                    col_suggestions.append({
-                        'type': 'zero_inflation_handling',
-                        'reason': f'{zero_pct:.1f}% zero values',
-                        'priority': 'medium'
-                    })
-                
-                suggestions['numeric_transformations'][col] = col_suggestions
-            
-            # Analyze categorical features
-            for col in categorical_cols:
-                col_data = df[col].dropna()
-                if len(col_data) == 0:
-                    continue
-                
-                col_suggestions = []
-                unique_count = col_data.nunique()
-                
-                # High cardinality
-                if unique_count > 50:
-                    col_suggestions.append({
-                        'type': 'group_rare_categories',
-                        'reason': f'High cardinality ({unique_count} unique values)',
-                        'priority': 'high'
-                    })
-                elif unique_count > 10:
-                    col_suggestions.append({
-                        'type': 'target_encoding',
-                        'reason': f'Medium cardinality ({unique_count} unique values)',
-                        'priority': 'medium'
-                    })
-                else:
-                    col_suggestions.append({
-                        'type': 'one_hot_encoding',
-                        'reason': f'Low cardinality ({unique_count} unique values)',
-                        'priority': 'low'
-                    })
-                
-                # Check for rare categories
-                value_counts = col_data.value_counts()
-                rare_categories = (value_counts / len(col_data) < 0.01).sum()
-                if rare_categories > 0:
-                    col_suggestions.append({
-                        'type': 'group_rare_categories',
-                        'reason': f'{rare_categories} categories with <1% frequency',
-                        'priority': 'medium'
-                    })
-                
-                suggestions['categorical_transformations'][col] = col_suggestions
-            
-            # Feature creation suggestions
-            feature_creation = []
-            
-            # Polynomial features for numeric data
-            if len(numeric_cols) >= 2:
-                feature_creation.append({
-                    'type': 'polynomial_features',
-                    'reason': 'Multiple numeric features available for interaction',
-                    'priority': 'medium'
-                })
-            
-            # Binning for numeric features
-            for col in numeric_cols:
-                if df[col].nunique() > 20:
-                    feature_creation.append({
-                        'type': 'binning',
-                        'column': col,
-                        'reason': f'High unique values ({df[col].nunique()})',
-                        'priority': 'low'
-                    })
-            
-            suggestions['feature_creation'] = feature_creation
-            
-            # Feature selection suggestions
-            if len(df.columns) > 50:
-                suggestions['feature_selection']['dimensionality_reduction'] = {
-                    'type': 'pca',
-                    'reason': f'High dimensionality ({len(df.columns)} features)',
-                    'priority': 'high'
-                }
-            
-            # Data quality issues
-            data_quality = []
-            
-            # Missing values
-            missing_cols = df.isnull().sum()
-            missing_cols = missing_cols[missing_cols > 0]
-            for col, missing_count in missing_cols.items():
                 missing_pct = (missing_count / len(df)) * 100
-                if missing_pct > 50:
-                    data_quality.append({
-                        'type': 'drop_column',
-                        'column': col,
-                        'reason': f'{missing_pct:.1f}% missing values',
-                        'priority': 'high'
-                    })
-                elif missing_pct > 20:
-                    data_quality.append({
-                        'type': 'advanced_imputation',
-                        'column': col,
-                        'reason': f'{missing_pct:.1f}% missing values',
-                        'priority': 'medium'
-                    })
-                else:
-                    data_quality.append({
-                        'type': 'simple_imputation',
-                        'column': col,
-                        'reason': f'{missing_pct:.1f}% missing values',
-                        'priority': 'low'
-                    })
-            
-            suggestions['data_quality'] = data_quality
-            
-            return suggestions
-            
-        except Exception as e:
-            logging.error(f"Error analyzing features: {str(e)}")
-            return {'error': str(e)}
-    
-    def apply_numeric_transformations(self, df, transformations):
-        """Apply numeric transformations to dataframe"""
-        try:
-            df_transformed = df.copy()
-            transformation_log = []
-            
-            for transformation in transformations:
-                transform_type = transformation['type']
-                columns = transformation.get('columns', [])
-                
-                if transform_type == 'standard_scaling':
-                    scaler = StandardScaler()
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            col_data = df_transformed[col].values.reshape(-1, 1)
-                            df_transformed[col] = scaler.fit_transform(col_data).flatten()
-                            transformation_log.append(f"Applied standard scaling to {col}")
-                
-                elif transform_type == 'min_max_scaling':
-                    scaler = MinMaxScaler()
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            col_data = df_transformed[col].values.reshape(-1, 1)
-                            df_transformed[col] = scaler.fit_transform(col_data).flatten()
-                            transformation_log.append(f"Applied min-max scaling to {col}")
-                
-                elif transform_type == 'robust_scaling':
-                    scaler = RobustScaler()
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            col_data = df_transformed[col].values.reshape(-1, 1)
-                            df_transformed[col] = scaler.fit_transform(col_data).flatten()
-                            transformation_log.append(f"Applied robust scaling to {col}")
-                
-                elif transform_type == 'log_transform':
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            # Add small constant to handle zeros
-                            df_transformed[f'{col}_log'] = np.log1p(df_transformed[col])
-                            transformation_log.append(f"Applied log transform to {col}")
-                
-                elif transform_type == 'sqrt_transform':
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            df_transformed[f'{col}_sqrt'] = np.sqrt(np.abs(df_transformed[col]))
-                            transformation_log.append(f"Applied square root transform to {col}")
-                
-                elif transform_type == 'box_cox':
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            col_data = df_transformed[col].dropna()
-                            if (col_data > 0).all():
-                                transformed_data, _ = boxcox(col_data)
-                                df_transformed.loc[col_data.index, f'{col}_boxcox'] = transformed_data
-                                transformation_log.append(f"Applied Box-Cox transform to {col}")
-                
-                elif transform_type == 'binning':
-                    n_bins = transformation.get('n_bins', 5)
-                    strategy = transformation.get('strategy', 'uniform')
-                    
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            discretizer = KBinsDiscretizer(n_bins=n_bins, encode='ordinal', strategy=strategy)
-                            col_data = df_transformed[col].values.reshape(-1, 1)
-                            df_transformed[f'{col}_binned'] = discretizer.fit_transform(col_data).flatten()
-                            transformation_log.append(f"Applied binning to {col} ({n_bins} bins)")
-                
-                elif transform_type == 'polynomial_features':
-                    degree = transformation.get('degree', 2)
-                    poly = PolynomialFeatures(degree=degree, include_bias=False)
-                    
-                    if columns:
-                        col_data = df_transformed[columns]
-                        poly_features = poly.fit_transform(col_data)
-                        feature_names = poly.get_feature_names_out(columns)
-                        
-                        # Add new polynomial features
-                        for i, name in enumerate(feature_names):
-                            if name not in columns:  # Skip original features
-                                df_transformed[name] = poly_features[:, i]
-                        
-                        transformation_log.append(f"Created polynomial features (degree {degree}) for {columns}")
-            
-            return {
-                'transformed_data': df_transformed,
-                'transformation_log': transformation_log,
-                'success': True
-            }
-            
-        except Exception as e:
-            logging.error(f"Error applying numeric transformations: {str(e)}")
-            return {'error': str(e), 'success': False}
-    
-    def apply_categorical_transformations(self, df, transformations):
-        """Apply categorical transformations to dataframe"""
-        try:
-            df_transformed = df.copy()
-            transformation_log = []
-            encoders = {}
-            
-            for transformation in transformations:
-                transform_type = transformation['type']
-                columns = transformation.get('columns', [])
-                
-                if transform_type == 'one_hot_encoding':
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            # Create dummy variables
-                            dummies = pd.get_dummies(df_transformed[col], prefix=col)
-                            df_transformed = pd.concat([df_transformed, dummies], axis=1)
-                            df_transformed.drop(col, axis=1, inplace=True)
-                            transformation_log.append(f"Applied one-hot encoding to {col}")
-                
-                elif transform_type == 'label_encoding':
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            encoder = LabelEncoder()
-                            df_transformed[f'{col}_encoded'] = encoder.fit_transform(df_transformed[col].astype(str))
-                            encoders[col] = encoder
-                            transformation_log.append(f"Applied label encoding to {col}")
-                
-                elif transform_type == 'ordinal_encoding':
-                    categories = transformation.get('categories', None)
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            if categories and col in categories:
-                                encoder = OrdinalEncoder(categories=[categories[col]])
-                            else:
-                                encoder = OrdinalEncoder()
-                            
-                            col_data = df_transformed[col].values.reshape(-1, 1)
-                            df_transformed[f'{col}_ordinal'] = encoder.fit_transform(col_data).flatten()
-                            encoders[col] = encoder
-                            transformation_log.append(f"Applied ordinal encoding to {col}")
-                
-                elif transform_type == 'frequency_encoding':
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            freq_map = df_transformed[col].value_counts().to_dict()
-                            df_transformed[f'{col}_freq'] = df_transformed[col].map(freq_map)
-                            transformation_log.append(f"Applied frequency encoding to {col}")
-                
-                elif transform_type == 'group_rare_categories':
-                    threshold = transformation.get('threshold', 0.01)
-                    for col in columns:
-                        if col in df_transformed.columns:
-                            value_counts = df_transformed[col].value_counts()
-                            rare_categories = value_counts[value_counts / len(df_transformed) < threshold].index
-                            df_transformed[col] = df_transformed[col].replace(rare_categories, 'Other')
-                            transformation_log.append(f"Grouped {len(rare_categories)} rare categories in {col}")
-                
-                elif transform_type == 'target_encoding':
-                    target_col = transformation.get('target_column')
-                    if target_col and target_col in df_transformed.columns:
-                        for col in columns:
-                            if col in df_transformed.columns:
-                                target_mean = df_transformed.groupby(col)[target_col].mean()
-                                df_transformed[f'{col}_target_encoded'] = df_transformed[col].map(target_mean)
-                                transformation_log.append(f"Applied target encoding to {col}")
-            
-            return {
-                'transformed_data': df_transformed,
-                'transformation_log': transformation_log,
-                'encoders': encoders,
-                'success': True
-            }
-            
-        except Exception as e:
-            logging.error(f"Error applying categorical transformations: {str(e)}")
-            return {'error': str(e), 'success': False}
-    
-    def handle_missing_values(self, df, strategy='auto'):
-        """Handle missing values in the dataset"""
-        try:
-            df_imputed = df.copy()
-            imputation_log = []
-            
-            missing_summary = df.isnull().sum()
-            missing_cols = missing_summary[missing_summary > 0]
-            
-            if len(missing_cols) == 0:
-                return {
-                    'imputed_data': df_imputed,
-                    'imputation_log': ['No missing values found'],
-                    'success': True
-                }
-            
-            for col in missing_cols.index:
-                missing_pct = (missing_cols[col] / len(df)) * 100
                 
                 if strategy == 'auto':
                     # Auto-select strategy based on data type and missing percentage
                     if missing_pct > 50:
-                        # Drop columns with >50% missing
-                        df_imputed.drop(col, axis=1, inplace=True)
-                        imputation_log.append(f"Dropped {col} ({missing_pct:.1f}% missing)")
-                    elif df[col].dtype in ['object', 'category']:
-                        # Most frequent for categorical
-                        imputer = SimpleImputer(strategy='most_frequent')
-                        df_imputed[col] = imputer.fit_transform(df_imputed[[col]]).flatten()
-                        imputation_log.append(f"Imputed {col} with most frequent value")
-                    else:
-                        # Median for numeric
-                        if missing_pct > 20:
-                            # KNN imputation for high missing percentage
-                            imputer = KNNImputer(n_neighbors=5)
-                            df_imputed[col] = imputer.fit_transform(df_imputed[[col]]).flatten()
-                            imputation_log.append(f"Imputed {col} with KNN (5 neighbors)")
+                        # Too many missing values - consider dropping
+                        current_strategy = 'drop_column'
+                        result_df = result_df.drop(columns=[col])
+                    elif df[col].dtype in ['int64', 'float64']:
+                        if missing_pct < 5:
+                            current_strategy = 'mean'
+                            result_df[col].fillna(df[col].mean(), inplace=True)
+                        elif missing_pct < 20:
+                            current_strategy = 'median'
+                            result_df[col].fillna(df[col].median(), inplace=True)
                         else:
-                            # Simple median imputation
-                            imputer = SimpleImputer(strategy='median')
-                            df_imputed[col] = imputer.fit_transform(df_imputed[[col]]).flatten()
-                            imputation_log.append(f"Imputed {col} with median")
+                            current_strategy = 'knn'
+                            imputer = KNNImputer(n_neighbors=5)
+                            result_df[col] = imputer.fit_transform(result_df[[col]]).ravel()
+                    else:
+                        # Categorical
+                        if missing_pct < 10:
+                            current_strategy = 'mode'
+                            mode_value = df[col].mode()[0] if not df[col].mode().empty else 'unknown'
+                            result_df[col].fillna(mode_value, inplace=True)
+                        else:
+                            current_strategy = 'constant'
+                            result_df[col].fillna('missing', inplace=True)
+                else:
+                    current_strategy = strategy
+                    if strategy == 'mean' and df[col].dtype in ['int64', 'float64']:
+                        result_df[col].fillna(df[col].mean(), inplace=True)
+                    elif strategy == 'median' and df[col].dtype in ['int64', 'float64']:
+                        result_df[col].fillna(df[col].median(), inplace=True)
+                    elif strategy == 'mode':
+                        mode_value = df[col].mode()[0] if not df[col].mode().empty else 'unknown'
+                        result_df[col].fillna(mode_value, inplace=True)
+                    elif strategy == 'constant':
+                        fill_value = 0 if df[col].dtype in ['int64', 'float64'] else 'missing'
+                        result_df[col].fillna(fill_value, inplace=True)
+                    elif strategy == 'knn':
+                        imputer = KNNImputer(n_neighbors=5)
+                        if df[col].dtype in ['int64', 'float64']:
+                            result_df[col] = imputer.fit_transform(result_df[[col]]).ravel()
+                        else:
+                            # For categorical, encode first
+                            le = LabelEncoder()
+                            encoded = le.fit_transform(df[col].astype(str).fillna('missing'))
+                            imputed = imputer.fit_transform(encoded.reshape(-1, 1)).ravel()
+                            result_df[col] = le.inverse_transform(imputed.astype(int))
+                    elif strategy == 'iterative':
+                        imputer = IterativeImputer(random_state=42)
+                        if df[col].dtype in ['int64', 'float64']:
+                            result_df[col] = imputer.fit_transform(result_df[[col]]).ravel()
+                    elif strategy == 'drop':
+                        result_df = result_df.dropna(subset=[col])
                 
-                elif strategy == 'drop':
-                    df_imputed.drop(col, axis=1, inplace=True)
-                    imputation_log.append(f"Dropped {col}")
-                
-                elif strategy == 'mean':
-                    if df[col].dtype in ['int64', 'float64']:
-                        imputer = SimpleImputer(strategy='mean')
-                        df_imputed[col] = imputer.fit_transform(df_imputed[[col]]).flatten()
-                        imputation_log.append(f"Imputed {col} with mean")
-                
-                elif strategy == 'median':
-                    if df[col].dtype in ['int64', 'float64']:
-                        imputer = SimpleImputer(strategy='median')
-                        df_imputed[col] = imputer.fit_transform(df_imputed[[col]]).flatten()
-                        imputation_log.append(f"Imputed {col} with median")
-                
-                elif strategy == 'mode':
-                    imputer = SimpleImputer(strategy='most_frequent')
-                    df_imputed[col] = imputer.fit_transform(df_imputed[[col]]).flatten()
-                    imputation_log.append(f"Imputed {col} with mode")
-                
-                elif strategy == 'knn':
-                    imputer = KNNImputer(n_neighbors=5)
-                    df_imputed[col] = imputer.fit_transform(df_imputed[[col]]).flatten()
-                    imputation_log.append(f"Imputed {col} with KNN")
+                strategies_used[col] = current_strategy
             
             return {
-                'imputed_data': df_imputed,
-                'imputation_log': imputation_log,
+                'data': result_df,
+                'strategies_used': strategies_used,
+                'original_shape': df.shape,
+                'final_shape': result_df.shape,
                 'success': True
             }
             
         except Exception as e:
-            logging.error(f"Error handling missing values: {str(e)}")
+            logging.error(f"Error in missing value handling: {str(e)}")
             return {'error': str(e), 'success': False}
     
-    def feature_selection(self, df, target_column, method='auto', k=10):
-        """Perform feature selection"""
+    def remove_outliers(self, df, method='auto', columns=None, threshold=3.0):
+        """
+        Comprehensive outlier removal
+        
+        Args:
+            df: DataFrame
+            method: 'iqr', 'zscore', 'modified_zscore', 'isolation_forest', 'auto'
+            columns: Columns to process (None for all numeric)
+            threshold: Threshold for outlier detection
+        """
+        try:
+            if columns is None:
+                columns = df.select_dtypes(include=['number']).columns.tolist()
+            
+            result_df = df.copy()
+            outliers_removed = {}
+            
+            for col in columns:
+                if col not in df.columns or df[col].dtype not in ['int64', 'float64']:
+                    continue
+                
+                original_count = len(result_df)
+                col_data = result_df[col].dropna()
+                
+                if len(col_data) == 0:
+                    continue
+                
+                if method == 'auto':
+                    # Auto-select method based on data distribution
+                    skewness = abs(col_data.skew())
+                    if skewness > 1:
+                        current_method = 'iqr'  # Use IQR for skewed data
+                    else:
+                        current_method = 'zscore'  # Use Z-score for normal data
+                else:
+                    current_method = method
+                
+                if current_method == 'iqr':
+                    Q1 = col_data.quantile(0.25)
+                    Q3 = col_data.quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    outlier_mask = (result_df[col] < lower_bound) | (result_df[col] > upper_bound)
+                    
+                elif current_method == 'zscore':
+                    z_scores = np.abs(stats.zscore(col_data))
+                    outlier_indices = col_data.index[z_scores > threshold]
+                    outlier_mask = result_df.index.isin(outlier_indices)
+                    
+                elif current_method == 'modified_zscore':
+                    median = np.median(col_data)
+                    mad = np.median(np.abs(col_data - median))
+                    modified_z_scores = 0.6745 * (col_data - median) / mad if mad != 0 else np.zeros_like(col_data)
+                    outlier_indices = col_data.index[np.abs(modified_z_scores) > threshold]
+                    outlier_mask = result_df.index.isin(outlier_indices)
+                
+                # Remove outliers
+                outliers_count = outlier_mask.sum()
+                result_df = result_df[~outlier_mask]
+                
+                outliers_removed[col] = {
+                    'method': current_method,
+                    'outliers_count': int(outliers_count),
+                    'outliers_percentage': float((outliers_count / original_count) * 100)
+                }
+            
+            return {
+                'data': result_df,
+                'outliers_removed': outliers_removed,
+                'original_shape': df.shape,
+                'final_shape': result_df.shape,
+                'success': True
+            }
+            
+        except Exception as e:
+            logging.error(f"Error in outlier removal: {str(e)}")
+            return {'error': str(e), 'success': False}
+    
+    def perform_feature_selection(self, df, target_column, method='auto', k=10, problem_type='auto'):
+        """
+        Comprehensive feature selection
+        
+        Args:
+            df: DataFrame
+            target_column: Target variable column name
+            method: 'univariate', 'rfe', 'lasso', 'random_forest', 'mutual_info', 'auto'
+            k: Number of features to select
+            problem_type: 'classification', 'regression', 'auto'
+        """
         try:
             if target_column not in df.columns:
-                return {'error': f'Target column {target_column} not found'}
+                return {'error': f'Target column {target_column} not found', 'success': False}
             
-            X = df.drop(target_column, axis=1)
+            # Prepare data
+            X = df.drop(columns=[target_column])
             y = df[target_column]
             
-            # Remove non-numeric columns for now (can be enhanced later)
-            numeric_X = X.select_dtypes(include=[np.number])
+            # Auto-detect problem type
+            if problem_type == 'auto':
+                if y.dtype in ['int64', 'float64'] and y.nunique() > 10:
+                    problem_type = 'regression'
+                else:
+                    problem_type = 'classification'
             
-            if len(numeric_X.columns) == 0:
-                return {'error': 'No numeric features available for selection'}
+            # Handle categorical variables
+            X_processed = X.copy()
+            categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
             
-            results = {}
+            if categorical_cols:
+                for col in categorical_cols:
+                    le = LabelEncoder()
+                    X_processed[col] = le.fit_transform(X_processed[col].astype(str))
             
-            # Determine problem type
-            if y.dtype in ['object', 'category'] or y.nunique() <= 20:
-                problem_type = 'classification'
-                score_func = f_classif
-                mi_func = mutual_info_classif
-            else:
-                problem_type = 'regression'
-                score_func = f_regression
-                mi_func = mutual_info_regression
+            # Select feature selection method
+            if method == 'auto':
+                if len(X_processed.columns) > 50:
+                    method = 'lasso'  # Use Lasso for high-dimensional data
+                else:
+                    method = 'univariate'  # Use univariate for smaller datasets
             
-            if method == 'auto' or method == 'univariate':
-                # Univariate feature selection
-                selector = SelectKBest(score_func=score_func, k=min(k, len(numeric_X.columns)))
-                X_selected = selector.fit_transform(numeric_X, y)
-                selected_features = numeric_X.columns[selector.get_support()].tolist()
-                scores = selector.scores_
+            selected_features = []
+            feature_scores = {}
+            
+            if method == 'univariate':
+                if problem_type == 'classification':
+                    selector = SelectKBest(score_func=f_classif, k=min(k, len(X_processed.columns)))
+                else:
+                    selector = SelectKBest(score_func=f_regression, k=min(k, len(X_processed.columns)))
                 
-                results['univariate'] = {
-                    'selected_features': selected_features,
-                    'scores': dict(zip(numeric_X.columns, scores)),
-                    'method': 'univariate'
-                }
-            
-            if method == 'auto' or method == 'mutual_info':
-                # Mutual information
-                mi_scores = mi_func(numeric_X, y)
-                mi_results = dict(zip(numeric_X.columns, mi_scores))
-                top_mi_features = sorted(mi_results.items(), key=lambda x: x[1], reverse=True)[:k]
+                X_selected = selector.fit_transform(X_processed, y)
+                selected_features = X_processed.columns[selector.get_support()].tolist()
+                feature_scores = dict(zip(X_processed.columns, selector.scores_))
                 
-                results['mutual_info'] = {
-                    'selected_features': [feat for feat, _ in top_mi_features],
-                    'scores': mi_results,
-                    'method': 'mutual_information'
-                }
-            
-            if method == 'auto' or method == 'correlation':
-                # Correlation-based selection
-                correlations = numeric_X.corrwith(y).abs()
-                top_corr_features = correlations.nlargest(k)
+            elif method == 'rfe':
+                if problem_type == 'classification':
+                    estimator = RandomForestClassifier(n_estimators=50, random_state=42)
+                else:
+                    estimator = RandomForestRegressor(n_estimators=50, random_state=42)
                 
-                results['correlation'] = {
-                    'selected_features': top_corr_features.index.tolist(),
-                    'scores': top_corr_features.to_dict(),
-                    'method': 'correlation'
-                }
-            
-            # Remove highly correlated features
-            if method == 'auto' or method == 'remove_correlated':
-                corr_matrix = numeric_X.corr().abs()
-                upper_triangle = corr_matrix.where(
-                    np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
-                )
+                selector = RFE(estimator, n_features_to_select=min(k, len(X_processed.columns)))
+                selector.fit(X_processed, y)
+                selected_features = X_processed.columns[selector.support_].tolist()
+                feature_scores = dict(zip(X_processed.columns, selector.ranking_))
                 
-                to_drop = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.95)]
-                remaining_features = [col for col in numeric_X.columns if col not in to_drop]
+            elif method == 'lasso':
+                if problem_type == 'classification':
+                    from sklearn.linear_model import LogisticRegressionCV
+                    estimator = LogisticRegressionCV(cv=5, random_state=42, max_iter=1000)
+                else:
+                    estimator = LassoCV(cv=5, random_state=42)
                 
-                results['remove_correlated'] = {
-                    'selected_features': remaining_features,
-                    'dropped_features': to_drop,
-                    'method': 'remove_highly_correlated'
-                }
+                estimator.fit(X_processed, y)
+                feature_importance = np.abs(estimator.coef_).flatten()
+                top_indices = np.argsort(feature_importance)[-k:]
+                selected_features = X_processed.columns[top_indices].tolist()
+                feature_scores = dict(zip(X_processed.columns, feature_importance))
+                
+            elif method == 'random_forest':
+                if problem_type == 'classification':
+                    estimator = RandomForestClassifier(n_estimators=100, random_state=42)
+                else:
+                    estimator = RandomForestRegressor(n_estimators=100, random_state=42)
+                
+                estimator.fit(X_processed, y)
+                feature_importance = estimator.feature_importances_
+                top_indices = np.argsort(feature_importance)[-k:]
+                selected_features = X_processed.columns[top_indices].tolist()
+                feature_scores = dict(zip(X_processed.columns, feature_importance))
+                
+            elif method == 'mutual_info':
+                if problem_type == 'classification':
+                    mi_scores = mutual_info_classif(X_processed, y, random_state=42)
+                else:
+                    mi_scores = mutual_info_regression(X_processed, y, random_state=42)
+                
+                top_indices = np.argsort(mi_scores)[-k:]
+                selected_features = X_processed.columns[top_indices].tolist()
+                feature_scores = dict(zip(X_processed.columns, mi_scores))
             
-            return results
+            # Create result dataframe with selected features
+            result_df = df[selected_features + [target_column]]
+            
+            return {
+                'data': result_df,
+                'selected_features': selected_features,
+                'feature_scores': feature_scores,
+                'method_used': method,
+                'problem_type': problem_type,
+                'original_features': len(X.columns),
+                'selected_count': len(selected_features),
+                'success': True
+            }
             
         except Exception as e:
             logging.error(f"Error in feature selection: {str(e)}")
-            return {'error': str(e)}
+            return {'error': str(e), 'success': False}
     
-    def create_interaction_features(self, df, feature_pairs=None, max_pairs=10):
-        """Create interaction features between numeric columns"""
+    def perform_pca(self, df, n_components='auto', target_column=None):
+        """
+        Principal Component Analysis
+        
+        Args:
+            df: DataFrame
+            n_components: Number of components or 'auto' for optimal selection
+            target_column: Column to exclude from PCA (if any)
+        """
         try:
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            # Prepare data
+            if target_column and target_column in df.columns:
+                X = df.drop(columns=[target_column])
+                y = df[target_column]
+            else:
+                X = df.copy()
+                y = None
             
-            if len(numeric_cols) < 2:
-                return {'error': 'At least 2 numeric columns required for interactions'}
+            # Select only numeric columns
+            numeric_cols = X.select_dtypes(include=['number']).columns.tolist()
+            if len(numeric_cols) == 0:
+                return {'error': 'No numeric columns found for PCA', 'success': False}
             
-            df_interactions = df.copy()
-            interaction_log = []
+            X_numeric = X[numeric_cols]
             
-            if feature_pairs is None:
-                # Auto-select top correlated pairs
-                corr_matrix = df[numeric_cols].corr().abs()
+            # Handle missing values
+            if X_numeric.isnull().any().any():
+                imputer = SimpleImputer(strategy='mean')
+                X_numeric = pd.DataFrame(imputer.fit_transform(X_numeric), 
+                                      columns=X_numeric.columns, 
+                                      index=X_numeric.index)
+            
+            # Standardize the data
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X_numeric)
+            
+            # Determine number of components
+            if n_components == 'auto':
+                # Use elbow method to find optimal number of components
+                pca_temp = PCA()
+                pca_temp.fit(X_scaled)
+                cumsum = np.cumsum(pca_temp.explained_variance_ratio_)
                 
-                # Get upper triangle of correlation matrix
-                upper_triangle = corr_matrix.where(
-                    np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
-                )
-                
-                # Find pairs with moderate correlation (0.3 < |r| < 0.9)
-                pairs = []
-                for col in upper_triangle.columns:
-                    for row in upper_triangle.index:
-                        corr_val = upper_triangle.loc[row, col]
-                        if 0.3 < corr_val < 0.9:
-                            pairs.append((row, col, corr_val))
-                
-                # Sort by correlation and take top pairs
-                pairs.sort(key=lambda x: x[2], reverse=True)
-                feature_pairs = [(pair[0], pair[1]) for pair in pairs[:max_pairs]]
+                # Find the elbow point (95% variance explained)
+                n_components = np.argmax(cumsum >= 0.95) + 1
+                n_components = min(n_components, len(numeric_cols), 10)  # Limit to 10 components
+            else:
+                n_components = min(n_components, len(numeric_cols))
             
-            # Create interaction features
-            for col1, col2 in feature_pairs:
-                if col1 in df.columns and col2 in df.columns:
-                    # Multiplication
-                    df_interactions[f'{col1}_x_{col2}'] = df[col1] * df[col2]
-                    interaction_log.append(f"Created multiplication: {col1} × {col2}")
-                    
-                    # Addition
-                    df_interactions[f'{col1}_plus_{col2}'] = df[col1] + df[col2]
-                    interaction_log.append(f"Created addition: {col1} + {col2}")
-                    
-                    # Ratio (if col2 has no zeros)
-                    if (df[col2] != 0).all():
-                        df_interactions[f'{col1}_div_{col2}'] = df[col1] / df[col2]
-                        interaction_log.append(f"Created ratio: {col1} / {col2}")
-                    
-                    # Difference
-                    df_interactions[f'{col1}_minus_{col2}'] = df[col1] - df[col2]
-                    interaction_log.append(f"Created difference: {col1} - {col2}")
+            # Perform PCA
+            pca = PCA(n_components=n_components)
+            X_pca = pca.fit_transform(X_scaled)
+            
+            # Create result dataframe
+            component_names = [f'PC{i+1}' for i in range(n_components)]
+            result_df = pd.DataFrame(X_pca, columns=component_names, index=X.index)
+            
+            # Add target column back if it exists
+            if y is not None:
+                result_df[target_column] = y
+            
+            # Create loadings dataframe
+            loadings = pd.DataFrame(
+                pca.components_.T,
+                columns=component_names,
+                index=numeric_cols
+            )
             
             return {
-                'data_with_interactions': df_interactions,
-                'interaction_log': interaction_log,
+                'data': result_df,
+                'loadings': loadings.to_dict(),
+                'explained_variance_ratio': pca.explained_variance_ratio_.tolist(),
+                'cumulative_variance_ratio': np.cumsum(pca.explained_variance_ratio_).tolist(),
+                'n_components': n_components,
+                'original_features': len(numeric_cols),
+                'variance_explained': float(np.sum(pca.explained_variance_ratio_)),
                 'success': True
             }
             
         except Exception as e:
-            logging.error(f"Error creating interaction features: {str(e)}")
+            logging.error(f"Error in PCA: {str(e)}")
             return {'error': str(e), 'success': False}
     
-    def dimensionality_reduction(self, df, method='pca', n_components=None):
-        """Apply dimensionality reduction techniques"""
+    def scale_features(self, df, method='standard', columns=None):
+        """
+        Feature scaling
+        
+        Args:
+            df: DataFrame
+            method: 'standard', 'minmax', 'robust'
+            columns: Columns to scale (None for all numeric)
+        """
         try:
-            numeric_df = df.select_dtypes(include=[np.number])
+            if columns is None:
+                columns = df.select_dtypes(include=['number']).columns.tolist()
             
-            if numeric_df.empty:
-                return {'error': 'No numeric columns for dimensionality reduction'}
+            result_df = df.copy()
+            scaling_info = {}
             
-            # Handle missing values
-            imputer = SimpleImputer(strategy='median')
-            numeric_data = imputer.fit_transform(numeric_df)
-            
-            # Standardize data
-            scaler = StandardScaler()
-            scaled_data = scaler.fit_transform(numeric_data)
-            
-            if method == 'pca':
-                if n_components is None:
-                    n_components = min(10, scaled_data.shape[1])
-                
-                pca = PCA(n_components=n_components)
-                transformed_data = pca.fit_transform(scaled_data)
-                
-                # Create DataFrame with PCA components
-                pca_df = pd.DataFrame(
-                    transformed_data,
-                    columns=[f'PC{i+1}' for i in range(n_components)],
-                    index=df.index
-                )
-                
-                # Add non-numeric columns back
-                non_numeric_df = df.select_dtypes(exclude=[np.number])
-                result_df = pd.concat([pca_df, non_numeric_df], axis=1)
-                
-                return {
-                    'transformed_data': result_df,
-                    'explained_variance_ratio': pca.explained_variance_ratio_.tolist(),
-                    'cumulative_variance': np.cumsum(pca.explained_variance_ratio_).tolist(),
-                    'components': pca.components_.tolist(),
-                    'feature_names': numeric_df.columns.tolist(),
-                    'method': 'pca',
-                    'success': True
-                }
-            
+            if method == 'standard':
+                scaler = StandardScaler()
+            elif method == 'minmax':
+                scaler = MinMaxScaler()
+            elif method == 'robust':
+                scaler = RobustScaler()
             else:
-                return {'error': f'Unknown dimensionality reduction method: {method}'}
+                return {'error': f'Unknown scaling method: {method}', 'success': False}
+            
+            for col in columns:
+                if col in df.columns and df[col].dtype in ['int64', 'float64']:
+                    original_values = df[col].values.reshape(-1, 1)
+                    scaled_values = scaler.fit_transform(original_values)
+                    result_df[col] = scaled_values.flatten()
+                    
+                    scaling_info[col] = {
+                        'method': method,
+                        'original_mean': float(df[col].mean()),
+                        'original_std': float(df[col].std()),
+                        'scaled_mean': float(result_df[col].mean()),
+                        'scaled_std': float(result_df[col].std())
+                    }
+            
+            return {
+                'data': result_df,
+                'scaling_info': scaling_info,
+                'method_used': method,
+                'success': True
+            }
             
         except Exception as e:
-            logging.error(f"Error in dimensionality reduction: {str(e)}")
+            logging.error(f"Error in feature scaling: {str(e)}")
+            return {'error': str(e), 'success': False}
+    
+    def encode_categorical_features(self, df, method='auto', columns=None):
+        """
+        Encode categorical features
+        
+        Args:
+            df: DataFrame
+            method: 'label', 'onehot', 'auto'
+            columns: Columns to encode (None for all categorical)
+        """
+        try:
+            if columns is None:
+                columns = df.select_dtypes(include=['object', 'category']).columns.tolist()
+            
+            result_df = df.copy()
+            encoding_info = {}
+            
+            for col in columns:
+                if col not in df.columns:
+                    continue
+                
+                unique_count = df[col].nunique()
+                
+                if method == 'auto':
+                    # Auto-select encoding method based on cardinality
+                    if unique_count <= 10:
+                        current_method = 'onehot'
+                    else:
+                        current_method = 'label'
+                else:
+                    current_method = method
+                
+                if current_method == 'label':
+                    le = LabelEncoder()
+                    result_df[col] = le.fit_transform(df[col].astype(str))
+                    encoding_info[col] = {
+                        'method': 'label',
+                        'unique_count': unique_count,
+                        'classes': le.classes_.tolist()
+                    }
+                    
+                elif current_method == 'onehot':
+                    # Create dummy variables
+                    dummies = pd.get_dummies(df[col], prefix=col, dummy_na=True)
+                    result_df = result_df.drop(columns=[col])
+                    result_df = pd.concat([result_df, dummies], axis=1)
+                    
+                    encoding_info[col] = {
+                        'method': 'onehot',
+                        'unique_count': unique_count,
+                        'new_columns': dummies.columns.tolist()
+                    }
+            
+            return {
+                'data': result_df,
+                'encoding_info': encoding_info,
+                'original_shape': df.shape,
+                'final_shape': result_df.shape,
+                'success': True
+            }
+            
+        except Exception as e:
+            logging.error(f"Error in categorical encoding: {str(e)}")
+            return {'error': str(e), 'success': False}
+    
+    def create_polynomial_features(self, df, degree=2, columns=None, interaction_only=False):
+        """Create polynomial features"""
+        try:
+            from sklearn.preprocessing import PolynomialFeatures
+            
+            if columns is None:
+                columns = df.select_dtypes(include=['number']).columns.tolist()
+            
+            # Limit to prevent explosion of features
+            columns = columns[:5] if len(columns) > 5 else columns
+            
+            if not columns:
+                return {'error': 'No numeric columns found', 'success': False}
+            
+            X = df[columns]
+            other_cols = df.drop(columns=columns)
+            
+            poly = PolynomialFeatures(degree=degree, interaction_only=interaction_only, include_bias=False)
+            X_poly = poly.fit_transform(X)
+            
+            # Create feature names
+            feature_names = poly.get_feature_names_out(columns)
+            
+            # Create result dataframe
+            poly_df = pd.DataFrame(X_poly, columns=feature_names, index=df.index)
+            result_df = pd.concat([poly_df, other_cols], axis=1)
+            
+            return {
+                'data': result_df,
+                'new_features': feature_names.tolist(),
+                'original_features': len(columns),
+                'total_features': len(feature_names),
+                'degree': degree,
+                'success': True
+            }
+            
+        except Exception as e:
+            logging.error(f"Error creating polynomial features: {str(e)}")
+            return {'error': str(e), 'success': False}
+    
+    def create_binned_features(self, df, columns=None, n_bins=5, strategy='uniform'):
+        """Create binned categorical features from continuous variables"""
+        try:
+            if columns is None:
+                columns = df.select_dtypes(include=['number']).columns.tolist()
+            
+            result_df = df.copy()
+            binning_info = {}
+            
+            for col in columns:
+                if col not in df.columns:
+                    continue
+                
+                try:
+                    if strategy == 'uniform':
+                        result_df[f'{col}_binned'], bins = pd.cut(df[col], bins=n_bins, retbins=True, labels=False)
+                    elif strategy == 'quantile':
+                        result_df[f'{col}_binned'], bins = pd.qcut(df[col], q=n_bins, retbins=True, labels=False, duplicates='drop')
+                    
+                    binning_info[col] = {
+                        'strategy': strategy,
+                        'n_bins': n_bins,
+                        'bins': bins.tolist(),
+                        'new_column': f'{col}_binned'
+                    }
+                    
+                except Exception as col_error:
+                    logging.warning(f"Could not bin column {col}: {str(col_error)}")
+                    continue
+            
+            return {
+                'data': result_df,
+                'binning_info': binning_info,
+                'success': True
+            }
+            
+        except Exception as e:
+            logging.error(f"Error creating binned features: {str(e)}")
             return {'error': str(e), 'success': False}

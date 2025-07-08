@@ -1,5 +1,5 @@
 import logging
-from flask import Blueprint, render_template, request, jsonify
+from flask import Blueprint, render_template, request, jsonify, current_app
 from models import Dataset
 from services.data_processor import DataProcessor
 from services.visualization_engine import VisualizationEngine
@@ -8,15 +8,50 @@ visualization_bp = Blueprint('visualization', __name__)
 
 def _handle_visualization_response(viz_result):
     """Helper function to handle visualization engine responses"""
-    if isinstance(viz_result, dict) and 'error' in viz_result:
-        return viz_result
-    elif isinstance(viz_result, dict) and 'plot' in viz_result:
-        return viz_result
-    elif isinstance(viz_result, dict) and 'plots' in viz_result:
-        return viz_result
-    else:
-        # Legacy format - assume it's a plotly JSON string
-        return {'plot': viz_result, 'type': 'plotly'}
+    try:
+        if isinstance(viz_result, dict):
+            if 'error' in viz_result:
+                return viz_result
+            elif 'plot' in viz_result:
+                return viz_result
+            elif 'plots' in viz_result:
+                return viz_result
+            else:
+                # If it's a dict but doesn't have expected keys, assume it's a plotly JSON
+                return {'plot': viz_result, 'type': 'plotly'}
+        elif isinstance(viz_result, str):
+            # Legacy format - assume it's a plotly JSON string
+            return {'plot': viz_result, 'type': 'plotly'}
+        else:
+            return {'error': 'Invalid visualization result format'}
+    except Exception as e:
+        logging.error(f"Error handling visualization response: {str(e)}")
+        return {'error': f'Response handling error: {str(e)}'}
+
+@visualization_bp.route('/<int:dataset_id>')
+def visualization_page(dataset_id):
+    """Visualization dashboard page"""
+    try:
+        dataset = Dataset.query.get_or_404(dataset_id)
+        processor = DataProcessor()
+        df, _ = processor.load_file(dataset.file_path)
+        
+        if df is not None:
+            # Get column information for visualization options
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+            all_cols = list(df.columns)
+            
+            return render_template('visualization_dashboard.html', 
+                                 dataset=dataset.to_dict(),
+                                 numeric_columns=numeric_cols,
+                                 categorical_columns=categorical_cols,
+                                 all_columns=all_cols)
+    except Exception as e:
+        logging.error(f"Visualization page error: {str(e)}")
+        current_app.logger.error(f"Visualization page error: {str(e)}")
+    
+    return render_template('visualization_dashboard.html', dataset={'id': dataset_id, 'name': 'Unknown'})
 
 @visualization_bp.route('/api/generate/<int:dataset_id>')
 def generate_visualizations(dataset_id):
@@ -26,14 +61,14 @@ def generate_visualizations(dataset_id):
         columns = request.args.getlist('columns')
         
         if not chart_types:
-            return jsonify({'error': 'No chart types specified'}), 400
+            return jsonify({'error': 'No chart types specified', 'success': False}), 400
         
         dataset = Dataset.query.get_or_404(dataset_id)
         processor = DataProcessor()
         df, _ = processor.load_file(dataset.file_path)
         
         if df is None:
-            return jsonify({'error': 'Could not load dataset'}), 500
+            return jsonify({'error': 'Could not load dataset', 'success': False}), 500
         
         viz_engine = VisualizationEngine()
         visualizations = {}
@@ -115,6 +150,42 @@ def generate_visualizations(dataset_id):
                     else:
                         visualizations['3d_plots'] = {'error': 'Insufficient numeric columns for 3D plots'}
                         
+                # Add univariate, bivariate, and multivariate analysis options
+                elif chart_type == 'univariate_analysis' and columns:
+                    visualizations['univariate_analysis'] = {}
+                    for col in columns:
+                        if col in df.columns:
+                            # Create comprehensive univariate analysis
+                            if df[col].dtype in ['int64', 'float64']:
+                                result = viz_engine.create_distribution_plot(df, col)
+                            else:
+                                result = viz_engine.create_bar_chart(df, col)
+                            visualizations['univariate_analysis'][col] = _handle_visualization_response(result)
+                            
+                elif chart_type == 'bivariate_analysis' and len(columns) >= 2:
+                    visualizations['bivariate_analysis'] = {}
+                    # Create scatter plots for all pairs
+                    for i in range(len(columns)-1):
+                        for j in range(i+1, len(columns)):
+                            col1, col2 = columns[i], columns[j]
+                            if col1 in df.columns and col2 in df.columns:
+                                pair_key = f"{col1}_vs_{col2}"
+                                result = viz_engine.create_comparison_visualizations(df, col1, col2)
+                                visualizations['bivariate_analysis'][pair_key] = _handle_visualization_response(result)
+                                
+                elif chart_type == 'multivariate_analysis':
+                    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                    if len(numeric_cols) >= 3:
+                        visualizations['multivariate_analysis'] = {}
+                        # PCA visualization
+                        result = viz_engine.create_pca_visualizations(df)
+                        visualizations['multivariate_analysis']['pca'] = _handle_visualization_response(result)
+                        # Correlation heatmap
+                        result = viz_engine.create_correlation_heatmap(df)
+                        visualizations['multivariate_analysis']['correlation'] = _handle_visualization_response(result)
+                    else:
+                        visualizations['multivariate_analysis'] = {'error': 'Insufficient numeric columns for multivariate analysis'}
+                        
                 else:
                     visualizations[chart_type] = {'error': f'Unknown chart type: {chart_type}'}
                     
@@ -122,11 +193,12 @@ def generate_visualizations(dataset_id):
                 logging.error(f"Error generating {chart_type}: {str(chart_error)}")
                 visualizations[chart_type] = {'error': str(chart_error)}
         
-        return jsonify(visualizations)
+        return jsonify({'visualizations': visualizations, 'success': True})
         
     except Exception as e:
         logging.error(f"Visualization generation error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        current_app.logger.error(f"Visualization generation error: {str(e)}")
+        return jsonify({'error': str(e), 'success': False}), 500
 
 @visualization_bp.route('/api/comparison/<int:dataset_id>')
 def comparison_visualizations(dataset_id):

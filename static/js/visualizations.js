@@ -23,19 +23,36 @@ class VisualizationManager {
             const params = new URLSearchParams();
             chartTypes.forEach(type => params.append('charts', type));
             
+            // Add selected columns if any
+            const selectedColumns = this.getSelectedColumns();
+            selectedColumns.forEach(col => params.append('columns', col));
+            
             const response = await fetch(`/visualization/api/generate/${this.currentDatasetId}?${params}`);
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
             const data = await response.json();
             
-            if (response.ok) {
-                this.displayCharts(data);
+            if (data.success) {
+                this.displayCharts(data.visualizations);
+                showAlert('success', 'Visualizations generated successfully!');
             } else {
                 showAlert('error', data.error || 'Error generating charts');
             }
         } catch (error) {
+            console.error('Visualization error:', error);
             showAlert('error', 'Network error: ' + error.message);
         } finally {
             hideLoading();
         }
+    }
+
+    // Get selected columns from UI
+    getSelectedColumns() {
+        const columnCheckboxes = document.querySelectorAll('input[name="selected_columns"]:checked');
+        return Array.from(columnCheckboxes).map(cb => cb.value);
     }
 
     // Generate Custom Chart
@@ -73,54 +90,167 @@ class VisualizationManager {
     // Display Charts
     displayCharts(data) {
         const container = document.getElementById('charts-container');
-        if (!container) return;
+        if (!container) {
+            console.error('Charts container not found');
+            return;
+        }
 
         let html = '<h5><i class="fas fa-chart-pie me-2"></i>Generated Visualizations</h5>';
+        
+        if (!data || typeof data !== 'object') {
+            html += '<div class="alert alert-warning">No visualization data received</div>';
+            container.innerHTML = html;
+            return;
+        }
         
         Object.keys(data).forEach(chartType => {
             const chartData = data[chartType];
             
-            if (chartData.error) {
+            if (chartData && chartData.error) {
                 html += `
                     <div class="card bg-dark border-danger mb-3">
                         <div class="card-header bg-danger">
-                            <h6 class="mb-0">${chartType.replace('_', ' ').toUpperCase()}</h6>
+                            <h6 class="mb-0">${this.formatChartTypeName(chartType)}</h6>
                         </div>
                         <div class="card-body">
                             <p class="text-danger">${chartData.error}</p>
                         </div>
                     </div>
                 `;
-            } else {
-                html += `
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header">
-                            <div class="d-flex justify-content-between align-items-center">
-                                <h6 class="mb-0">${chartType.replace('_', ' ').toUpperCase()}</h6>
-                                <div class="btn-group btn-group-sm">
-                                    <button class="btn btn-outline-primary" onclick="downloadChart('${chartType}')">
-                                        <i class="fas fa-download"></i>
-                                    </button>
-                                    <button class="btn btn-outline-secondary" onclick="fullscreenChart('${chartType}')">
-                                        <i class="fas fa-expand"></i>
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div id="chart-${chartType}" class="chart-container">
-                                ${chartData.html || '<div class="text-center">Chart generated successfully</div>'}
-                            </div>
-                        </div>
-                    </div>
-                `;
+            } else if (chartData) {
+                html += this.createChartCard(chartType, chartData);
             }
         });
         
         container.innerHTML = html;
         
-        // Load chart images or plots if available
-        this.loadChartImages(data);
+        // Load chart visualizations
+        this.loadChartVisualizations(data);
+    }
+
+    // Create chart card HTML
+    createChartCard(chartType, chartData) {
+        return `
+            <div class="card bg-dark border-secondary mb-3">
+                <div class="card-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0">${this.formatChartTypeName(chartType)}</h6>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-primary" onclick="visualizationManager.downloadChart('${chartType}')">
+                                <i class="fas fa-download"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary" onclick="visualizationManager.fullscreenChart('${chartType}')">
+                                <i class="fas fa-expand"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="chart-${chartType}" class="chart-container" style="min-height: 400px;">
+                        <div class="text-center">
+                            <div class="spinner-border" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2">Rendering chart...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // Format chart type names for display
+    formatChartTypeName(chartType) {
+        return chartType.replace(/_/g, ' ')
+                       .replace(/\b\w/g, l => l.toUpperCase());
+    }
+
+    // Load chart visualizations
+    loadChartVisualizations(data) {
+        Object.keys(data).forEach(chartType => {
+            const chartData = data[chartType];
+            const container = document.getElementById(`chart-${chartType}`);
+            
+            if (!container || !chartData || chartData.error) {
+                return;
+            }
+            
+            try {
+                if (chartData.type === 'plotly' && chartData.plot) {
+                    // Handle Plotly charts
+                    let plotData;
+                    if (typeof chartData.plot === 'string') {
+                        plotData = JSON.parse(chartData.plot);
+                    } else {
+                        plotData = chartData.plot;
+                    }
+                    
+                    // Configure Plotly with dark theme
+                    const config = {
+                        responsive: true,
+                        displayModeBar: true,
+                        displaylogo: false,
+                        modeBarButtonsToRemove: ['pan2d', 'lasso2d']
+                    };
+                    
+                    // Apply dark theme
+                    if (plotData.layout) {
+                        plotData.layout.paper_bgcolor = '#2b3035';
+                        plotData.layout.plot_bgcolor = '#2b3035';
+                        plotData.layout.font = { color: '#ffffff' };
+                    }
+                    
+                    Plotly.newPlot(container, plotData.data, plotData.layout, config);
+                    
+                } else if (chartData.type === 'image' && chartData.plot) {
+                    // Handle image charts (matplotlib/seaborn)
+                    container.innerHTML = `
+                        <img src="data:image/png;base64,${chartData.plot}" 
+                             class="img-fluid" 
+                             alt="${chartType} chart"
+                             style="max-width: 100%; height: auto;">
+                    `;
+                    
+                } else if (chartData.type === 'plotly_collection' && chartData.plots) {
+                    // Handle multiple plots
+                    container.innerHTML = '';
+                    Object.keys(chartData.plots).forEach((plotKey, index) => {
+                        const plotDiv = document.createElement('div');
+                        plotDiv.id = `${chartType}-${plotKey}-${index}`;
+                        plotDiv.style.marginBottom = '20px';
+                        container.appendChild(plotDiv);
+                        
+                        const plotData = JSON.parse(chartData.plots[plotKey]);
+                        if (plotData.layout) {
+                            plotData.layout.paper_bgcolor = '#2b3035';
+                            plotData.layout.plot_bgcolor = '#2b3035';
+                            plotData.layout.font = { color: '#ffffff' };
+                        }
+                        
+                        Plotly.newPlot(plotDiv, plotData.data, plotData.layout, {
+                            responsive: true,
+                            displayModeBar: true,
+                            displaylogo: false
+                        });
+                    });
+                    
+                } else {
+                    // Fallback for unknown formats
+                    container.innerHTML = `
+                        <div class="alert alert-info">
+                            Chart generated successfully, but visualization format not recognized.
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error(`Error loading chart ${chartType}:`, error);
+                container.innerHTML = `
+                    <div class="alert alert-danger">
+                        Error loading chart: ${error.message}
+                    </div>
+                `;
+            }
+        });
     }
 
     displayCustomChart(data) {
@@ -158,18 +288,6 @@ class VisualizationManager {
                 </div>
             `;
         }
-    }
-
-    loadChartImages(data) {
-        Object.keys(data).forEach(chartType => {
-            const chartData = data[chartType];
-            if (chartData.image_url) {
-                const container = document.getElementById(`chart-${chartType}`);
-                if (container) {
-                    container.innerHTML = `<img src="${chartData.image_url}" class="img-fluid" alt="${chartType} chart">`;
-                }
-            }
-        });
     }
 
     // Chart Controls

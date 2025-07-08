@@ -42,6 +42,7 @@ from routes.analysis import analysis_bp
 from routes.visualization import visualization_bp
 from routes.statistics import statistics_bp
 from routes.ml_models import ml_bp
+from routes.feature_engineering import feature_engineering_bp
 
 app.register_blueprint(main_bp)
 app.register_blueprint(upload_bp, url_prefix='/upload')
@@ -49,6 +50,7 @@ app.register_blueprint(analysis_bp, url_prefix='/analysis')
 app.register_blueprint(visualization_bp, url_prefix='/visualization')
 app.register_blueprint(statistics_bp, url_prefix='/statistics')
 app.register_blueprint(ml_bp, url_prefix='/ml')
+app.register_blueprint(feature_engineering_bp, url_prefix='/feature_engineering')
 
 with app.app_context():
     # Import models to ensure tables are created

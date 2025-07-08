@@ -575,6 +575,7 @@ function checkForUpdates() {
 
 // Navigation functions
 function showColumnAnalysis() {
+    const currentDatasetId = getCurrentDatasetId();
     if (currentDatasetId) {
         window.location.href = `/analysis/column/${currentDatasetId}`;
     } else {
@@ -583,6 +584,7 @@ function showColumnAnalysis() {
 }
 
 function showStatisticalTests() {
+    const currentDatasetId = getCurrentDatasetId();
     if (currentDatasetId) {
         window.location.href = `/statistics/${currentDatasetId}`;
     } else {
@@ -591,10 +593,179 @@ function showStatisticalTests() {
 }
 
 function showMLModels() {
+    const currentDatasetId = getCurrentDatasetId();
     if (currentDatasetId) {
         window.location.href = `/ml/${currentDatasetId}`;
     } else {
         showAlert('warning', 'Please select a dataset first.');
+    }
+}
+
+function showVisualization() {
+    const currentDatasetId = getCurrentDatasetId();
+    if (currentDatasetId) {
+        window.location.href = `/visualization/${currentDatasetId}`;
+    } else {
+        showAlert('warning', 'Please select a dataset first.');
+    }
+}
+
+function showFeatureEngineering() {
+    const currentDatasetId = getCurrentDatasetId();
+    if (currentDatasetId) {
+        window.location.href = `/feature_engineering/${currentDatasetId}`;
+    } else {
+        showAlert('warning', 'Please select a dataset first.');
+    }
+}
+
+function getCurrentDatasetId() {
+    // Try to get dataset ID from URL path
+    const pathParts = window.location.pathname.split('/');
+    for (let i = 0; i < pathParts.length; i++) {
+        if (!isNaN(parseInt(pathParts[i]))) {
+            return parseInt(pathParts[i]);
+        }
+    }
+    
+    // Try to get from global variable
+    if (typeof currentDatasetId !== 'undefined' && currentDatasetId) {
+        return currentDatasetId;
+    }
+    
+    // Try to get from local storage
+    const storedDatasetId = localStorage.getItem('currentDatasetId');
+    if (storedDatasetId && !isNaN(parseInt(storedDatasetId))) {
+        return parseInt(storedDatasetId);
+    }
+    
+    return null;
+}
+
+function setCurrentDatasetId(datasetId) {
+    window.currentDatasetId = datasetId;
+    localStorage.setItem('currentDatasetId', datasetId);
+    
+    // Update visualization and other managers
+    if (typeof visualizationManager !== 'undefined') {
+        visualizationManager.setDatasetId(datasetId);
+    }
+    if (typeof dataTableManager !== 'undefined') {
+        dataTableManager.setDatasetId(datasetId);
+    }
+}
+
+// Enhanced dataset loading with proper ID management
+function loadDatasetForAnalysis(datasetId) {
+    if (!datasetId) {
+        showAlert('error', 'No dataset ID provided');
+        return;
+    }
+    
+    setCurrentDatasetId(datasetId);
+    
+    // Load basic dataset information
+    fetch(`/analysis/api/column_details/${datasetId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                displayDatasetInfo(data);
+                showAlert('success', 'Dataset loaded successfully');
+            } else {
+                showAlert('error', data.error || 'Failed to load dataset information');
+            }
+        })
+        .catch(error => {
+            console.error('Error loading dataset:', error);
+            showAlert('error', 'Network error loading dataset');
+        });
+}
+
+function displayDatasetInfo(data) {
+    // Update dataset information display
+    const infoContainer = document.getElementById('dataset-info-container');
+    if (infoContainer && data.column_details) {
+        const columns = Object.keys(data.column_details);
+        const numericColumns = columns.filter(col => 
+            ['int64', 'float64'].includes(data.column_details[col].data_type)
+        );
+        const categoricalColumns = columns.filter(col => 
+            ['object', 'category'].includes(data.column_details[col].data_type)
+        );
+        
+        infoContainer.innerHTML = `
+            <div class="card bg-dark border-info">
+                <div class="card-body">
+                    <h6><i class="fas fa-database me-2"></i>Dataset Overview</h6>
+                    <div class="row">
+                        <div class="col-md-3">
+                            <small class="text-muted">Shape:</small><br>
+                            <strong>${data.dataset_shape[0]} rows × ${data.dataset_shape[1]} columns</strong>
+                        </div>
+                        <div class="col-md-3">
+                            <small class="text-muted">Numeric Columns:</small><br>
+                            <strong>${numericColumns.length}</strong>
+                        </div>
+                        <div class="col-md-3">
+                            <small class="text-muted">Categorical Columns:</small><br>
+                            <strong>${categoricalColumns.length}</strong>
+                        </div>
+                        <div class="col-md-3">
+                            <small class="text-muted">Memory Usage:</small><br>
+                            <strong>${data.total_memory_usage.toFixed(2)} MB</strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
+    // Update column details table
+    const tableContainer = document.getElementById('column-details-table');
+    if (tableContainer && data.column_details) {
+        let tableHTML = `
+            <div class="table-responsive">
+                <table class="table table-dark table-striped table-hover">
+                    <thead class="table-secondary">
+                        <tr>
+                            <th>Column</th>
+                            <th>Type</th>
+                            <th>Non-Null</th>
+                            <th>Missing</th>
+                            <th>Unique</th>
+                            <th>Min</th>
+                            <th>Max</th>
+                            <th>Mean</th>
+                            <th>Std</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        
+        Object.keys(data.column_details).forEach(col => {
+            const details = data.column_details[col];
+            tableHTML += `
+                <tr>
+                    <td><strong>${col}</strong></td>
+                    <td><span class="badge bg-primary">${details.data_type}</span></td>
+                    <td>${details.non_null_count}</td>
+                    <td>${details.null_count} (${details.null_percentage.toFixed(1)}%)</td>
+                    <td>${details.unique_count}</td>
+                    <td>${details.min !== undefined ? details.min.toFixed(2) : 'N/A'}</td>
+                    <td>${details.max !== undefined ? details.max.toFixed(2) : 'N/A'}</td>
+                    <td>${details.mean !== undefined ? details.mean.toFixed(2) : 'N/A'}</td>
+                    <td>${details.std !== undefined ? details.std.toFixed(2) : 'N/A'}</td>
+                </tr>
+            `;
+        });
+        
+        tableHTML += `
+                    </tbody>
+                </table>
+            </div>
+        `;
+        
+        tableContainer.innerHTML = tableHTML;
     }
 }
 

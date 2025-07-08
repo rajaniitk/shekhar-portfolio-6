@@ -170,3 +170,106 @@ def generate_insights(dataset_id):
     except Exception as e:
         logging.error(f"Insights generation error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@analysis_bp.route('/api/column_details/<int:dataset_id>')
+def get_column_details(dataset_id):
+    """Get detailed statistics for all columns"""
+    try:
+        dataset = Dataset.query.get_or_404(dataset_id)
+        processor = DataProcessor()
+        df, _ = processor.load_file(dataset.file_path)
+        
+        if df is None:
+            return jsonify({'error': 'Could not load dataset', 'success': False}), 500
+        
+        column_details = {}
+        
+        for col in df.columns:
+            col_info = {
+                'column_name': col,
+                'data_type': str(df[col].dtype),
+                'total_count': len(df),
+                'non_null_count': int(df[col].count()),
+                'null_count': int(df[col].isnull().sum()),
+                'null_percentage': float((df[col].isnull().sum() / len(df)) * 100),
+                'unique_count': int(df[col].nunique()),
+                'unique_percentage': float((df[col].nunique() / len(df)) * 100)
+            }
+            
+            # Add numeric statistics
+            if df[col].dtype in ['int64', 'float64']:
+                col_data = df[col].dropna()
+                if len(col_data) > 0:
+                    col_info.update({
+                        'min': float(col_data.min()),
+                        'max': float(col_data.max()),
+                        'mean': float(col_data.mean()),
+                        'median': float(col_data.median()),
+                        'std': float(col_data.std()),
+                        'variance': float(col_data.var()),
+                        'q25': float(col_data.quantile(0.25)),
+                        'q75': float(col_data.quantile(0.75)),
+                        'iqr': float(col_data.quantile(0.75) - col_data.quantile(0.25)),
+                        'range': float(col_data.max() - col_data.min()),
+                        'skewness': float(col_data.skew()),
+                        'kurtosis': float(col_data.kurtosis()),
+                        'coefficient_of_variation': float(col_data.std() / col_data.mean()) if col_data.mean() != 0 else None,
+                        'zeros_count': int((col_data == 0).sum()),
+                        'negative_count': int((col_data < 0).sum()),
+                        'positive_count': int((col_data > 0).sum())
+                    })
+                    
+                    # Outlier detection using IQR method
+                    Q1 = col_data.quantile(0.25)
+                    Q3 = col_data.quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    outliers = col_data[(col_data < lower_bound) | (col_data > upper_bound)]
+                    
+                    col_info.update({
+                        'outliers_count': len(outliers),
+                        'outliers_percentage': float((len(outliers) / len(col_data)) * 100),
+                        'outlier_lower_bound': float(lower_bound),
+                        'outlier_upper_bound': float(upper_bound)
+                    })
+            
+            # Add categorical statistics
+            elif df[col].dtype in ['object', 'category']:
+                value_counts = df[col].value_counts()
+                col_info.update({
+                    'most_frequent': str(value_counts.index[0]) if len(value_counts) > 0 else None,
+                    'most_frequent_count': int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
+                    'most_frequent_percentage': float((value_counts.iloc[0] / len(df)) * 100) if len(value_counts) > 0 else 0,
+                    'least_frequent': str(value_counts.index[-1]) if len(value_counts) > 0 else None,
+                    'least_frequent_count': int(value_counts.iloc[-1]) if len(value_counts) > 0 else 0,
+                    'cardinality': int(df[col].nunique()),
+                    'top_5_values': dict(value_counts.head(5))
+                })
+                
+                # Text analysis for string columns
+                if df[col].dtype == 'object':
+                    text_data = df[col].dropna().astype(str)
+                    if len(text_data) > 0:
+                        col_info.update({
+                            'avg_length': float(text_data.str.len().mean()),
+                            'min_length': int(text_data.str.len().min()),
+                            'max_length': int(text_data.str.len().max()),
+                            'total_characters': int(text_data.str.len().sum()),
+                            'empty_strings': int((text_data == '').sum()),
+                            'contains_numbers': int(text_data.str.contains(r'\d', na=False).sum()),
+                            'contains_special_chars': int(text_data.str.contains(r'[^a-zA-Z0-9\s]', na=False).sum())
+                        })
+            
+            column_details[col] = col_info
+        
+        return jsonify({
+            'column_details': column_details,
+            'dataset_shape': df.shape,
+            'total_memory_usage': float(df.memory_usage(deep=True).sum() / 1024 / 1024),  # MB
+            'success': True
+        })
+        
+    except Exception as e:
+        logging.error(f"Column details error: {str(e)}")
+        return jsonify({'error': str(e), 'success': False}), 500
