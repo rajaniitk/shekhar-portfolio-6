@@ -8,10 +8,11 @@ from app import db
 feature_engineering_bp = Blueprint('feature_engineering', __name__)
 
 @feature_engineering_bp.route('/<int:dataset_id>')
-def feature_engineering_page(dataset_id):
-    """Feature engineering page"""
+def feature_engineering_dashboard(dataset_id):
+    """Feature engineering dashboard page"""
+    dataset = Dataset.query.get_or_404(dataset_id)
+    
     try:
-        dataset = Dataset.query.get_or_404(dataset_id)
         processor = DataProcessor()
         df, _ = processor.load_file(dataset.file_path)
         
@@ -21,27 +22,19 @@ def feature_engineering_page(dataset_id):
             categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
             all_cols = list(df.columns)
             
-            # Get missing value info
-            missing_info = {}
-            for col in all_cols:
-                missing_count = df[col].isnull().sum()
-                missing_info[col] = {
-                    'count': int(missing_count),
-                    'percentage': float((missing_count / len(df)) * 100) if len(df) > 0 else 0
-                }
-            
-            return render_template('feature_engineering.html', 
+            return render_template('feature_engineering_dashboard.html', 
                                  dataset=dataset.to_dict(),
                                  numeric_columns=numeric_cols,
                                  categorical_columns=categorical_cols,
-                                 all_columns=all_cols,
-                                 missing_info=missing_info,
-                                 data_shape=df.shape)
+                                 all_columns=all_cols)
     except Exception as e:
-        logging.error(f"Feature engineering page error: {str(e)}")
-        current_app.logger.error(f"Feature engineering page error: {str(e)}")
+        logging.error(f"Feature engineering dashboard error: {str(e)}")
     
-    return render_template('feature_engineering.html', dataset={'id': dataset_id, 'name': 'Unknown'})
+    return render_template('feature_engineering_dashboard.html', 
+                         dataset=dataset.to_dict(),
+                         numeric_columns=[],
+                         categorical_columns=[],
+                         all_columns=[])
 
 @feature_engineering_bp.route('/api/handle_missing/<int:dataset_id>', methods=['POST'])
 def handle_missing_values(dataset_id):
@@ -260,7 +253,7 @@ def create_binned_features(dataset_id):
 
 @feature_engineering_bp.route('/api/data_info/<int:dataset_id>')
 def get_data_info(dataset_id):
-    """Get comprehensive data information"""
+    """Get dataset information for feature engineering"""
     try:
         dataset = Dataset.query.get_or_404(dataset_id)
         processor = DataProcessor()
@@ -269,43 +262,25 @@ def get_data_info(dataset_id):
         if df is None:
             return jsonify({'error': 'Could not load dataset', 'success': False}), 500
         
-        # Comprehensive data information
+        # Calculate basic info
+        missing_values_count = df.isnull().sum().sum()
+        memory_usage = df.memory_usage(deep=True).sum() / 1024 / 1024  # MB
+        
         info = {
             'shape': df.shape,
-            'columns': list(df.columns),
-            'dtypes': df.dtypes.astype(str).to_dict(),
-            'missing_values': df.isnull().sum().to_dict(),
-            'unique_counts': df.nunique().to_dict(),
-            'memory_usage': df.memory_usage(deep=True).sum(),
-            'numeric_columns': df.select_dtypes(include=['number']).columns.tolist(),
-            'categorical_columns': df.select_dtypes(include=['object', 'category']).columns.tolist(),
-            'datetime_columns': df.select_dtypes(include=['datetime']).columns.tolist(),
+            'missing_values_count': int(missing_values_count),
+            'memory_usage': float(memory_usage),
+            'column_types': {
+                'numeric': len(df.select_dtypes(include=['number']).columns),
+                'categorical': len(df.select_dtypes(include=['object', 'category']).columns),
+                'datetime': len(df.select_dtypes(include=['datetime']).columns)
+            },
+            'missing_by_column': df.isnull().sum().to_dict(),
+            'success': True
         }
-        
-        # Basic statistics for numeric columns
-        numeric_stats = {}
-        for col in info['numeric_columns']:
-            if col in df.columns:
-                col_data = df[col].dropna()
-                if len(col_data) > 0:
-                    numeric_stats[col] = {
-                        'mean': float(col_data.mean()),
-                        'median': float(col_data.median()),
-                        'std': float(col_data.std()),
-                        'min': float(col_data.min()),
-                        'max': float(col_data.max()),
-                        'q25': float(col_data.quantile(0.25)),
-                        'q75': float(col_data.quantile(0.75)),
-                        'skewness': float(col_data.skew()),
-                        'kurtosis': float(col_data.kurtosis())
-                    }
-        
-        info['numeric_statistics'] = numeric_stats
-        info['success'] = True
         
         return jsonify(info)
         
     except Exception as e:
         logging.error(f"Data info error: {str(e)}")
-        current_app.logger.error(f"Data info error: {str(e)}")
         return jsonify({'error': str(e), 'success': False}), 500

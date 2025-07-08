@@ -265,3 +265,133 @@ def advanced_visualizations(dataset_id):
     except Exception as e:
         logging.error(f"Advanced visualization error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@visualization_bp.route('/api/data/<int:dataset_id>')
+def get_data_preview(dataset_id):
+    """Get data preview for visualization"""
+    try:
+        page = int(request.args.get('page', 0))
+        page_size = int(request.args.get('size', 100))
+        
+        dataset = Dataset.query.get_or_404(dataset_id)
+        processor = DataProcessor()
+        df, _ = processor.load_file(dataset.file_path)
+        
+        if df is None:
+            return jsonify({'error': 'Could not load dataset', 'success': False}), 500
+        
+        # Calculate pagination
+        total_rows = len(df)
+        start_idx = page * page_size
+        end_idx = min(start_idx + page_size, total_rows)
+        
+        # Get paginated data
+        page_data = df.iloc[start_idx:end_idx]
+        
+        # Convert to list format for JSON
+        data_list = []
+        for _, row in page_data.iterrows():
+            data_list.append([str(val) if val is not None else None for val in row.values])
+        
+        pagination_info = {
+            'current_page': page,
+            'page_size': page_size,
+            'total_rows': total_rows,
+            'total_pages': (total_rows + page_size - 1) // page_size,
+            'start': start_idx,
+            'end': end_idx
+        }
+        
+        return jsonify({
+            'data': data_list,
+            'columns': list(df.columns),
+            'pagination': pagination_info,
+            'success': True
+        })
+        
+    except Exception as e:
+        logging.error(f"Data preview error: {str(e)}")
+        return jsonify({'error': str(e), 'success': False}), 500
+
+@visualization_bp.route('/api/custom/<int:dataset_id>', methods=['POST'])
+def create_custom_chart(dataset_id):
+    """Create custom chart based on user configuration"""
+    try:
+        chart_config = request.get_json()
+        
+        if not chart_config:
+            return jsonify({'error': 'Chart configuration not provided', 'success': False}), 400
+        
+        dataset = Dataset.query.get_or_404(dataset_id)
+        processor = DataProcessor()
+        df, _ = processor.load_file(dataset.file_path)
+        
+        if df is None:
+            return jsonify({'error': 'Could not load dataset', 'success': False}), 500
+        
+        viz_engine = VisualizationEngine()
+        
+        # Extract configuration
+        chart_type = chart_config.get('chart_type')
+        x_column = chart_config.get('x_column')
+        y_column = chart_config.get('y_column')
+        color_column = chart_config.get('color_column')
+        size_column = chart_config.get('size_column')
+        title = chart_config.get('title', f'{chart_type.title()} Chart')
+        
+        # Validate columns exist
+        if x_column and x_column not in df.columns:
+            return jsonify({'error': f'Column {x_column} not found', 'success': False}), 400
+        
+        if y_column and y_column not in df.columns:
+            return jsonify({'error': f'Column {y_column} not found', 'success': False}), 400
+        
+        # Generate custom chart based on type
+        try:
+            if chart_type == 'scatter':
+                if not y_column:
+                    return jsonify({'error': 'Y column required for scatter plot', 'success': False}), 400
+                result = viz_engine.create_scatter_plot(df, x_column, y_column, color_column, size_column, title)
+                
+            elif chart_type == 'line':
+                if not y_column:
+                    return jsonify({'error': 'Y column required for line chart', 'success': False}), 400
+                result = viz_engine.create_line_chart(df, x_column, y_column, color_column, title)
+                
+            elif chart_type == 'bar':
+                result = viz_engine.create_bar_chart(df, x_column, y_column, title)
+                
+            elif chart_type == 'histogram':
+                result = viz_engine.create_distribution_plot(df, x_column)
+                
+            elif chart_type == 'box_plot':
+                result = viz_engine.create_box_plot(df, x_column, y_column)
+                
+            elif chart_type == 'violin_plot':
+                result = viz_engine.create_violin_plot(df, x_column, y_column)
+                
+            elif chart_type == 'heatmap':
+                if df.select_dtypes(include=['number']).shape[1] < 2:
+                    return jsonify({'error': 'Insufficient numeric columns for heatmap', 'success': False}), 400
+                result = viz_engine.create_correlation_heatmap(df)
+                
+            elif chart_type == 'bubble':
+                if not y_column or not size_column:
+                    return jsonify({'error': 'Y column and size column required for bubble chart', 'success': False}), 400
+                result = viz_engine.create_bubble_chart(df, x_column, y_column, size_column, color_column, title)
+                
+            else:
+                return jsonify({'error': f'Unknown chart type: {chart_type}', 'success': False}), 400
+            
+            return jsonify({
+                'chart': _handle_visualization_response(result),
+                'config': chart_config,
+                'success': True
+            })
+            
+        except Exception as chart_error:
+            return jsonify({'error': f'Chart generation error: {str(chart_error)}', 'success': False}), 500
+        
+    except Exception as e:
+        logging.error(f"Custom chart creation error: {str(e)}")
+        return jsonify({'error': str(e), 'success': False}), 500

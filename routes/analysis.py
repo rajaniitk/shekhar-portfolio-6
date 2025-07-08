@@ -273,3 +273,79 @@ def get_column_details(dataset_id):
     except Exception as e:
         logging.error(f"Column details error: {str(e)}")
         return jsonify({'error': str(e), 'success': False}), 500
+
+@analysis_bp.route('/api/column_action/<int:dataset_id>')
+def column_action(dataset_id):
+    """Perform actions on specific columns"""
+    try:
+        action = request.args.get('action')
+        columns = request.args.getlist('columns')
+        
+        if not action or not columns:
+            return jsonify({'error': 'Action and columns must be specified', 'success': False}), 400
+        
+        dataset = Dataset.query.get_or_404(dataset_id)
+        processor = DataProcessor()
+        df, _ = processor.load_file(dataset.file_path)
+        
+        if df is None:
+            return jsonify({'error': 'Could not load dataset', 'success': False}), 500
+        
+        eda_engine = EDAEngine()
+        insights_generator = InsightsGenerator()
+        
+        results = {}
+        
+        for column in columns:
+            if column not in df.columns:
+                results[column] = {'error': f'Column {column} not found'}
+                continue
+                
+            try:
+                if action == 'analyze':
+                    column_analysis = eda_engine.analyze_single_column(df, column)
+                    insights = insights_generator.generate_column_insights(df, column)
+                    
+                    results[column] = {
+                        'analysis': column_analysis,
+                        'insights': insights,
+                        'success': True
+                    }
+                    
+                elif action == 'describe':
+                    if df[column].dtype in ['int64', 'float64']:
+                        description = df[column].describe().to_dict()
+                    else:
+                        description = {
+                            'count': len(df[column]),
+                            'unique': df[column].nunique(),
+                            'top': df[column].mode().iloc[0] if len(df[column].mode()) > 0 else None,
+                            'freq': df[column].value_counts().iloc[0] if len(df[column]) > 0 else 0
+                        }
+                    results[column] = {'description': description, 'success': True}
+                    
+                elif action == 'value_counts':
+                    value_counts = df[column].value_counts().head(20).to_dict()
+                    results[column] = {'value_counts': value_counts, 'success': True}
+                    
+                elif action == 'missing_analysis':
+                    missing_count = df[column].isnull().sum()
+                    missing_percentage = (missing_count / len(df)) * 100
+                    results[column] = {
+                        'missing_count': int(missing_count),
+                        'missing_percentage': float(missing_percentage),
+                        'total_count': len(df),
+                        'success': True
+                    }
+                    
+                else:
+                    results[column] = {'error': f'Unknown action: {action}', 'success': False}
+                    
+            except Exception as col_error:
+                results[column] = {'error': str(col_error), 'success': False}
+        
+        return jsonify({'results': results, 'success': True})
+        
+    except Exception as e:
+        logging.error(f"Column action error: {str(e)}")
+        return jsonify({'error': str(e), 'success': False}), 500

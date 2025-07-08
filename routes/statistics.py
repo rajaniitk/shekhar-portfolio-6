@@ -30,6 +30,100 @@ def statistics_page(dataset_id):
     
     return render_template('statistical_tests.html', dataset=dataset.to_dict())
 
+@statistics_bp.route('/api/run_selected_test/<int:dataset_id>')
+def run_selected_test(dataset_id):
+    """Run selected statistical test"""
+    try:
+        test_type = request.args.get('test_type')
+        columns = request.args.getlist('columns')
+        groups = request.args.getlist('groups')
+        
+        if not test_type:
+            return jsonify({'error': 'Test type not specified', 'success': False}), 400
+        
+        dataset = Dataset.query.get_or_404(dataset_id)
+        processor = DataProcessor()
+        df, _ = processor.load_file(dataset.file_path)
+        
+        if df is None:
+            return jsonify({'error': 'Could not load dataset', 'success': False}), 500
+        
+        test_engine = StatisticalTestEngine()
+        results = {}
+        
+        if test_type == 'normality':
+            for column in columns:
+                if column in df.columns and df[column].dtype in ['int64', 'float64']:
+                    results[column] = test_engine.normality_tests(df[column])
+                    
+        elif test_type == 'variance':
+            if len(groups) >= 2:
+                group_data = []
+                for group in groups:
+                    if group in df.columns and df[group].dtype in ['int64', 'float64']:
+                        group_data.append(df[group].dropna())
+                
+                if len(group_data) >= 2:
+                    results = test_engine.variance_tests(group_data)
+                    
+        elif test_type == 'correlation':
+            if len(columns) >= 2:
+                col1, col2 = columns[0], columns[1]
+                if col1 in df.columns and col2 in df.columns:
+                    results = test_engine.correlation_tests(df[col1], df[col2])
+                    
+        elif test_type == 'ttest':
+            if len(groups) >= 2:
+                group1_data = df[groups[0]].dropna() if groups[0] in df.columns else None
+                group2_data = df[groups[1]].dropna() if groups[1] in df.columns else None
+                
+                if group1_data is not None and group2_data is not None:
+                    results = test_engine.t_tests(group1_data, group2_data)
+                    
+        elif test_type == 'anova':
+            group_data = []
+            for group in groups:
+                if group in df.columns and df[group].dtype in ['int64', 'float64']:
+                    group_data.append(df[group].dropna())
+            
+            if len(group_data) >= 2:
+                results = test_engine.anova_tests(group_data)
+                
+        elif test_type == 'chi_square':
+            if len(groups) >= 2:
+                col1_data = df[groups[0]] if groups[0] in df.columns else None
+                col2_data = df[groups[1]] if groups[1] in df.columns else None
+                
+                if col1_data is not None and col2_data is not None:
+                    results = test_engine.chi_square_test(col1_data, col2_data)
+        
+        elif test_type == 'non_parametric':
+            if len(groups) >= 2:
+                group1_data = df[groups[0]].dropna() if groups[0] in df.columns else None
+                group2_data = df[groups[1]].dropna() if groups[1] in df.columns else None
+                
+                if group1_data is not None and group2_data is not None:
+                    results = test_engine.non_parametric_tests(group1_data, group2_data)
+        
+        else:
+            return jsonify({'error': f'Unknown test type: {test_type}', 'success': False}), 400
+        
+        # Save results if any
+        if results:
+            analysis = Analysis(
+                dataset_id=dataset_id,
+                analysis_type=f'selected_test_{test_type}'
+            )
+            analysis.set_results(results)
+            db.session.add(analysis)
+            db.session.commit()
+        
+        return jsonify({'results': results, 'success': True})
+        
+    except Exception as e:
+        logging.error(f"Run selected test error: {str(e)}")
+        return jsonify({'error': str(e), 'success': False}), 500
+
 @statistics_bp.route('/api/normality/<int:dataset_id>')
 def normality_tests(dataset_id):
     """Perform normality tests"""
@@ -57,11 +151,11 @@ def normality_tests(dataset_id):
             db.session.add(analysis)
             db.session.commit()
             
-            return jsonify(results)
+            return jsonify({'results': results, 'success': True})
             
     except Exception as e:
         logging.error(f"Normality tests error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'success': False}), 500
 
 @statistics_bp.route('/api/variance/<int:dataset_id>')
 def variance_tests(dataset_id):
@@ -94,11 +188,11 @@ def variance_tests(dataset_id):
                 db.session.add(analysis)
                 db.session.commit()
                 
-                return jsonify(results)
+                return jsonify({'results': results, 'success': True})
             
     except Exception as e:
         logging.error(f"Variance tests error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'success': False}), 500
 
 @statistics_bp.route('/api/correlation/<int:dataset_id>')
 def correlation_tests(dataset_id):
@@ -124,11 +218,11 @@ def correlation_tests(dataset_id):
             db.session.add(analysis)
             db.session.commit()
             
-            return jsonify(results)
+            return jsonify({'results': results, 'success': True})
             
     except Exception as e:
         logging.error(f"Correlation tests error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'success': False}), 500
 
 @statistics_bp.route('/api/hypothesis/<int:dataset_id>')
 def hypothesis_tests(dataset_id):
@@ -188,11 +282,11 @@ def hypothesis_tests(dataset_id):
                 db.session.add(analysis)
                 db.session.commit()
             
-            return jsonify(results)
+            return jsonify({'results': results, 'success': True})
             
     except Exception as e:
         logging.error(f"Hypothesis tests error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'success': False}), 500
 
 @statistics_bp.route('/api/comprehensive/<int:dataset_id>')
 def comprehensive_tests(dataset_id):
@@ -215,8 +309,8 @@ def comprehensive_tests(dataset_id):
             db.session.add(analysis)
             db.session.commit()
             
-            return jsonify(results)
+            return jsonify({'results': results, 'success': True})
             
     except Exception as e:
         logging.error(f"Comprehensive tests error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'success': False}), 500
